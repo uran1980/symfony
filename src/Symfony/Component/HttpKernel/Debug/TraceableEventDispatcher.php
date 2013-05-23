@@ -132,6 +132,10 @@ class TraceableEventDispatcher implements EventDispatcherInterface, TraceableEve
 
         $this->firstCalledEvent[$eventName] = $this->stopwatch->start($eventName.'.loading', 'event_listener_loading');
 
+        if (!$this->dispatcher->hasListeners($eventName)) {
+            $this->firstCalledEvent[$eventName]->stop();
+        }
+
         $this->dispatcher->dispatch($eventName, $event);
 
         // reset the id as another event might have been dispatched during the dispatching of this event
@@ -381,14 +385,20 @@ class TraceableEventDispatcher implements EventDispatcherInterface, TraceableEve
             case KernelEvents::VIEW:
             case KernelEvents::RESPONSE:
                 // stop only if a controller has been executed
-                try {
+                if ($this->stopwatch->isStarted('controller')) {
                     $this->stopwatch->stop('controller');
-                } catch (\LogicException $e) {
                 }
                 break;
             case KernelEvents::TERMINATE:
                 $token = $event->getResponse()->headers->get('X-Debug-Token');
-                $this->stopwatch->openSection($token);
+                // There is a very special case when using builtin AppCache class as kernel wrapper, in the case
+                // of an ESI request leading to a `stale` response [B]  inside a `fresh` cached response [A].
+                // In this case, `$token` contains the [B] debug token, but the  open `stopwatch` section ID
+                // is equal to the [A] debug token. Trying to reopen section with the [B] token throws an exception
+                // which must be caught.
+                try {
+                    $this->stopwatch->openSection($token);
+                } catch (\LogicException $e) {}
                 break;
         }
     }
@@ -410,7 +420,11 @@ class TraceableEventDispatcher implements EventDispatcherInterface, TraceableEve
                 break;
             case KernelEvents::TERMINATE:
                 $token = $event->getResponse()->headers->get('X-Debug-Token');
-                $this->stopwatch->stopSection($token);
+                // In the special case described in the `preDispatch` method above, the `$token` section
+                // does not exist, then closing it throws an exception which must be caught.
+                try {
+                    $this->stopwatch->stopSection($token);
+                } catch (\LogicException $e) {}
                 // The children profiles have been updated by the previous 'kernel.response'
                 // event. Only the root profile need to be updated with the 'kernel.terminate'
                 // timing informations.

@@ -48,6 +48,8 @@ class FrameworkExtension extends Extension
         // will be used and everything will still work as expected.
         $loader->load('translation.xml');
 
+        $loader->load('debug_prod.xml');
+
         if ($container->getParameter('kernel.debug')) {
             $loader->load('debug.xml');
 
@@ -66,11 +68,9 @@ class FrameworkExtension extends Extension
             $container->setParameter('kernel.secret', $config['secret']);
         }
 
+        $container->setParameter('kernel.http_method_override', $config['http_method_override']);
+
         $container->setParameter('kernel.trusted_proxies', $config['trusted_proxies']);
-
-        // @deprecated, to be removed in 2.3
-        $container->setParameter('kernel.trust_proxy_headers', $config['trust_proxy_headers']);
-
         $container->setParameter('kernel.default_locale', $config['default_locale']);
 
         if (!empty($config['test'])) {
@@ -101,6 +101,10 @@ class FrameworkExtension extends Extension
         }
 
         $this->registerAnnotationsConfiguration($config['annotations'], $container, $loader);
+
+        if (isset($config['serializer']) && $config['serializer']['enabled']) {
+            $loader->load('serializer.xml');
+        }
 
         $this->addClassesToCompile(array(
             'Symfony\\Component\\HttpFoundation\\ParameterBag',
@@ -207,6 +211,13 @@ class FrameworkExtension extends Extension
      */
     private function registerProfilerConfiguration(array $config, ContainerBuilder $container, XmlFileLoader $loader)
     {
+        if (!$this->isConfigEnabled($container, $config)) {
+            // this is needed for the WebProfiler to work even if the profiler is disabled
+            $container->setParameter('data_collector.templates', array());
+
+            return;
+        }
+
         $loader->load('profiling.xml');
         $loader->load('collectors.xml');
 
@@ -252,7 +263,7 @@ class FrameworkExtension extends Extension
             }
         }
 
-        if (!$this->isConfigEnabled($container, $config)) {
+        if (!$config['collect']) {
             $container->getDefinition('profiler')->addMethodCall('disable', array());
         }
     }
@@ -269,8 +280,8 @@ class FrameworkExtension extends Extension
         $loader->load('routing.xml');
 
         $container->setParameter('router.resource', $config['resource']);
+        $container->setParameter('router.cache_class_prefix', $container->getParameter('kernel.name').ucfirst($container->getParameter('kernel.environment')));
         $router = $container->findDefinition('router.default');
-
         $argument = $router->getArgument(2);
         $argument['strict_requirements'] = $config['strict_requirements'];
         if (isset($config['type'])) {
@@ -310,19 +321,13 @@ class FrameworkExtension extends Extension
             }
         }
 
-        //we deprecated session options without cookie_ prefix, but we are still supporting them,
-        //Let's merge the ones that were supplied without prefix
-        foreach (array('lifetime', 'path', 'domain', 'secure', 'httponly') as $key) {
-            if (!isset($options['cookie_'.$key]) && isset($config[$key])) {
-                $options['cookie_'.$key] = $config[$key];
-            }
-        }
         $container->setParameter('session.storage.options', $options);
 
         // session handler (the internal callback registered with PHP session management)
         if (null == $config['handler_id']) {
             // Set the handler class to be null
             $container->getDefinition('session.storage.native')->replaceArgument(1, null);
+            $container->getDefinition('session.storage.php_bridge')->replaceArgument(1, null);
         } else {
             $container->setAlias('session.handler', $config['handler_id']);
         }
@@ -332,6 +337,7 @@ class FrameworkExtension extends Extension
         $this->addClassesToCompile(array(
             'Symfony\\Bundle\\FrameworkBundle\\EventListener\\SessionListener',
             'Symfony\\Component\\HttpFoundation\\Session\\Storage\\NativeSessionStorage',
+            'Symfony\\Component\\HttpFoundation\\Session\\Storage\\PhpBridgeSessionStorage',
             'Symfony\\Component\\HttpFoundation\\Session\\Storage\\Handler\\NativeFileSessionHandler',
             'Symfony\\Component\\HttpFoundation\\Session\\Storage\\Proxy\\AbstractProxy',
             'Symfony\\Component\\HttpFoundation\\Session\\Storage\\Proxy\\SessionHandlerProxy',
@@ -365,10 +371,13 @@ class FrameworkExtension extends Extension
 
         $container->setParameter('templating.helper.code.file_link_format', isset($links[$ide]) ? $links[$ide] : $ide);
         $container->setParameter('templating.helper.form.resources', $config['form']['resources']);
-        $container->setParameter('templating.hinclude.default_template', $config['hinclude_default_template']);
+        $container->setParameter('fragment.renderer.hinclude.global_template', $config['hinclude_default_template']);
 
         if ($container->getParameter('kernel.debug')) {
             $loader->load('templating_debug.xml');
+
+            $container->setDefinition('templating.engine.php', $container->findDefinition('debug.templating.engine.php'));
+            $container->setAlias('debug.templating.engine.php', 'templating.engine.php');
         }
 
         // create package definitions and add them to the assets helper
@@ -531,7 +540,10 @@ class FrameworkExtension extends Extension
         // Use the "real" translator instead of the identity default
         $container->setAlias('translator', 'translator.default');
         $translator = $container->findDefinition('translator.default');
-        $translator->addMethodCall('setFallbackLocale', array($config['fallback']));
+        if (!is_array($config['fallback'])) {
+            $config['fallback'] = array($config['fallback']);
+        }
+        $translator->addMethodCall('setFallbackLocales', array($config['fallback']));
 
         // Discover translation directories
         $dirs = array();
